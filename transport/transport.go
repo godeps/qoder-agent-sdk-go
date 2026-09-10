@@ -111,7 +111,6 @@ func (t *ProcessTransport) Initialize(ctx context.Context) error {
 	cmd := exec.CommandContext(ctx, path, args...)
 	cmd.Dir = t.opts.CWD
 	cmd.Env = env
-	cmd.Cancel = func() error { return nil } // graceful handled in Close
 
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
@@ -238,7 +237,7 @@ func (t *ProcessTransport) readStdout(r io.Reader) {
 		}
 		msg, err := protocol.ParseMessage(line)
 		if err != nil {
-			continue // skip unparseable lines (stderr leakage, keep-alive whitespace)
+			continue
 		}
 		if !t.send(msg) {
 			return

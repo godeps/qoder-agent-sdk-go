@@ -9,7 +9,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"time"
 
 	"github.com/godeps/qoder-agent-sdk-go/protocol"
 	"github.com/godeps/qoder-agent-sdk-go/transport"
@@ -128,12 +127,7 @@ func (r *queryRunner) runLoop() {
 func (r *queryRunner) dispatch(msg protocol.Message) {
 	switch m := msg.(type) {
 	case *protocol.SystemMessage:
-		if m.Subtype == "init" {
-			select {
-			case r.initCh <- m:
-			default:
-			}
-		}
+		// system/init (with protocol_version) is forwarded to the caller.
 		r.forward(m)
 	case *protocol.ControlResponse:
 		r.routeResponse(m)
@@ -175,22 +169,8 @@ func (r *queryRunner) routeResponse(m *protocol.ControlResponse) {
 // handshake waits for system/init, validates the protocol version, and sends
 // the initialize control request.
 func (r *queryRunner) handshake() error {
-	var init *protocol.SystemMessage
-	timeout := time.Duration(r.opts.InitializeTimeoutMs) * time.Millisecond
-	select {
-	case init = <-r.initCh:
-	case <-r.runDone:
-		return fmt.Errorf("qoder: qoderclicn exited before system/init\n%s", r.tr.StderrTail())
-	case <-time.After(timeout):
-		return ErrInitializeTimeout
-	case <-r.ctx.Done():
-		return r.ctx.Err()
-	}
-	if init.ProtocolVersion != "" {
-		if err := checkProtocolVersion(init.ProtocolVersion); err != nil {
-			return err
-		}
-	}
+	// qoderclicn expects the SDK to send initialize first; it replies with a
+	// system/init agent message (forwarded to the caller) and a control_response.
 	initReq := protocol.InitializeRequest{
 		Type:                           "initialize",
 		Model:                          r.opts.Model,
@@ -211,7 +191,7 @@ func (r *queryRunner) handshake() error {
 	}
 	resp, err := r.sendControlRequest(initReq)
 	if err != nil {
-		return err
+		return fmt.Errorf("qoder: initialize failed: %w (stderr: %s)", err, r.tr.StderrTail())
 	}
 	if !resp.IsSuccess() {
 		if e, _ := resp.Error(); e != nil {
