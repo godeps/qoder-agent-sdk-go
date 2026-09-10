@@ -36,6 +36,7 @@ type TransportOptions struct {
 	Proxy                           string
 	VpcEndpoint                     string
 	Auth                            auth.AuthOptions
+	Brand                           auth.Brand
 	Debug                           bool
 	Model                           string
 	Agent                           string
@@ -95,7 +96,7 @@ func NewProcessTransport(opts TransportOptions) *ProcessTransport {
 // Initialize resolves the executable, builds argv/env (including the one-shot
 // auth payload file), spawns the process, and starts the stdout/stderr pumps.
 func (t *ProcessTransport) Initialize(ctx context.Context) error {
-	path, err := runtime.ResolvePath(t.opts.PathToCLI)
+	path, err := runtime.ResolvePath(t.opts.Brand, t.opts.PathToCLI)
 	if err != nil {
 		return err
 	}
@@ -406,8 +407,15 @@ func (t *ProcessTransport) buildEnv() []string {
 		base["QODER_SDK_AUTH_PAYLOAD_FILE"] = t.authPayloadPath
 	}
 	if t.opts.VpcEndpoint != "" {
-		base["QODERCN_VPC_ENDPOINT"] = t.opts.VpcEndpoint
-		base["QODER_VPC_ENDPOINT"] = t.opts.VpcEndpoint
+		switch t.opts.Brand {
+		case auth.BrandGlobal:
+			base["QODER_VPC_ENDPOINT"] = t.opts.VpcEndpoint
+		case auth.BrandCN:
+			base["QODERCN_VPC_ENDPOINT"] = t.opts.VpcEndpoint
+		default:
+			base["QODERCN_VPC_ENDPOINT"] = t.opts.VpcEndpoint
+			base["QODER_VPC_ENDPOINT"] = t.opts.VpcEndpoint
+		}
 	}
 	env := make([]string, 0, len(base))
 	for k, v := range base {

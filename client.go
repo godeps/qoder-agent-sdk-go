@@ -76,6 +76,7 @@ func (r *queryRunner) start() error {
 		Proxy:                           o.Proxy,
 		VpcEndpoint:                     o.VpcEndpoint,
 		Auth:                            o.Auth,
+		Brand:                           o.Brand,
 		Debug:                           o.Debug,
 		Model:                           o.Model,
 		Agent:                           o.Agent,

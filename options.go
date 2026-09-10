@@ -18,6 +18,7 @@ type Options struct {
 	Proxy       string
 	VpcEndpoint string
 	Auth        auth.AuthOptions
+	Brand       auth.Brand
 	Debug       bool
 
 	// --- Model / behavior ---
@@ -103,6 +104,7 @@ func (o *Options) WithEnv(env map[string]string) *Options   { o.Env = env; retur
 func (o *Options) WithProxy(p string) *Options              { o.Proxy = p; return o }
 func (o *Options) WithVpcEndpoint(v string) *Options        { o.VpcEndpoint = v; return o }
 func (o *Options) WithAuth(a auth.AuthOptions) *Options     { o.Auth = a; return o }
+func (o *Options) WithBrand(b auth.Brand) *Options          { o.Brand = b; return o }
 func (o *Options) WithPathToCLI(p string) *Options          { o.PathToCLI = p; return o }
 func (o *Options) WithMaxTurns(n int) *Options              { o.MaxTurns = &n; return o }
 func (o *Options) WithSystemPrompt(s string) *Options       { o.SystemPrompt = s; return o }
