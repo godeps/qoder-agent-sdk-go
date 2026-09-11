@@ -2,6 +2,7 @@ package qodersdk_test
 
 import (
 	"context"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
@@ -68,5 +69,57 @@ func TestQuery_AuthNotConfigured(t *testing.T) {
 	_, err := qodersdk.Query(context.Background(), "hi", qodersdk.NewOptions())
 	if err != qodersdk.ErrAuthNotConfigured {
 		t.Fatalf("err = %v, want ErrAuthNotConfigured", err)
+	}
+}
+
+func TestListModels_FakeCLI(t *testing.T) {
+	cli := buildFakeCLI(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	opts := qodersdk.NewOptions().
+		WithPathToCLI(cli).
+		WithCWD(t.TempDir()).
+		WithAuth(auth.AccessToken("test-token"))
+	models, err := qodersdk.ListModels(ctx, opts)
+	if err != nil {
+		t.Fatalf("ListModels: %v", err)
+	}
+	if len(models) != 2 {
+		t.Fatalf("got %d models, want 2", len(models))
+	}
+	if models[0].Value != "fake-efficient" {
+		t.Errorf("models[0].Value = %q", models[0].Value)
+	}
+	if models[1].Value != "fake-performance" {
+		t.Errorf("models[1].Value = %q", models[1].Value)
+	}
+}
+
+func TestListModels_RealQodercli(t *testing.T) {
+	if testing.Short() {
+		t.Skip("real qoderclicn")
+	}
+	if os.Getenv("QODERCLI_PATH") == "" {
+		if _, err := exec.LookPath("qoderclicn"); err != nil {
+			if _, err2 := exec.LookPath("qodercli"); err2 != nil {
+				t.Skip("qoderclicn/qodercli not found (set QODERCLI_PATH)")
+			}
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	opts := qodersdk.NewOptions().WithAuth(auth.QodercliAuth())
+	if p := os.Getenv("QODERCLI_PATH"); p != "" {
+		opts = opts.WithPathToCLI(p)
+	}
+	models, err := qodersdk.ListModels(ctx, opts)
+	if err != nil {
+		t.Fatalf("ListModels: %v", err)
+	}
+	if len(models) == 0 {
+		t.Fatal("no models returned")
+	}
+	for _, m := range models {
+		t.Logf("model: %s (%s) default=%v reasoning=%v", m.Value, m.DisplayName, m.IsDefault, m.IsReasoning)
 	}
 }

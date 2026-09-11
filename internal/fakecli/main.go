@@ -65,12 +65,27 @@ func main() {
 			})
 			if reqType == "initialize" && !initialized {
 				initialized = true
+				writeLine(availableModelsUpdate())
 			}
 		case "user":
 			// reply with an assistant message + success result
 			writeLine(assistantMessage("asst-1", "Hello from fake qoderclicn"))
 			writeLine(resultSuccess("res-1"))
 		}
+	}
+}
+
+func availableModelsUpdate() map[string]any {
+	return map[string]any{
+		"type":    "system",
+		"subtype": "available_models_update",
+		"models": []map[string]any{
+			{"value": "fake-efficient", "displayName": "Efficient", "isDefault": true},
+			{"value": "fake-performance", "displayName": "Performance", "isReasoning": true, "maxInputTokens": 200000},
+		},
+		"currentModel": "fake-efficient",
+		"uuid":         "models-1",
+		"session_id":   "fake-session",
 	}
 }
 

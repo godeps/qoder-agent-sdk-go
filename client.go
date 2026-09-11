@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/godeps/qoder-agent-sdk-go/protocol"
 	"github.com/godeps/qoder-agent-sdk-go/transport"
@@ -40,6 +41,50 @@ func Query(ctx context.Context, prompt string, opts *Options) (<-chan protocol.M
 		return nil, err
 	}
 	return r.out, nil
+}
+
+// ListModels spawns qoderclicn, performs the initialize handshake, and returns
+// the model catalog the CLI pushes via system/available_models_update. It does
+// not send a user message; the session is torn down before returning.
+func ListModels(ctx context.Context, opts *Options) ([]protocol.ModelInfo, error) {
+	if opts == nil {
+		opts = NewOptions()
+	}
+	if !opts.Auth.Configured() {
+		return nil, ErrAuthNotConfigured
+	}
+	r := newQueryRunner(ctx, opts)
+	if err := r.start(); err != nil {
+		r.shutdown()
+		return nil, err
+	}
+	defer r.shutdown()
+	if err := r.handshake(); err != nil {
+		return nil, err
+	}
+	deadline := 15 * time.Second
+	if dl, ok := ctx.Deadline(); ok {
+		if d := time.Until(dl); d > 0 && d < deadline {
+			deadline = d
+		}
+	}
+	timer := time.NewTimer(deadline)
+	defer timer.Stop()
+	for {
+		select {
+		case m, ok := <-r.out:
+			if !ok {
+				return nil, ErrSessionClosed
+			}
+			if s, ok := m.(*protocol.SystemMessage); ok && s.Subtype == "available_models_update" {
+				return s.Models, nil
+			}
+		case <-timer.C:
+			return nil, fmt.Errorf("qoder: timed out waiting for available_models_update")
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
 }
 
 // queryRunner drives a single session: transport + message dispatch loop.
