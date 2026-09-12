@@ -51,6 +51,10 @@ type Options struct {
 	Resume         string
 	ForkSession    bool
 	PersistSession *bool
+	// EnableFileCheckpointing turns on workspace snapshots so rewind /
+	// rewind_files can roll files back to a user-message anchor. Required
+	// for Rewind with scope files/both.
+	EnableFileCheckpointing *bool
 
 	// --- Settings / directories ---
 	AdditionalDirectories []string
@@ -67,6 +71,14 @@ type Options struct {
 	HookCallback  func(ctx context.Context, req *protocol.HookCallbackRequest) (protocol.HookJSONOutput, error)
 	ResolveModel  func(ctx context.Context, req *protocol.GetModelPolicyRequest) (ModelPolicyResult, error)
 	OnAuthExpired func()
+	// McpMessageHandler proxies JSON-RPC frames for in-process SDK MCP
+	// servers (declared via McpServers entries of type "sdk"). The handler
+	// receives one MCP JSON-RPC message and returns the response message;
+	// return nil for notifications. Servers must also be listed in
+	// SdkMcpServers so the initialize handshake declares them.
+	McpMessageHandler func(ctx context.Context, serverName string, message json.RawMessage) (json.RawMessage, error)
+	// SdkMcpServers names the in-process MCP servers served by this host.
+	SdkMcpServers []string
 }
 
 // ModelPolicyResult is the host's response to a get_model_policy request.
@@ -143,5 +155,48 @@ func (o *Options) WithHookCallback(f func(ctx context.Context, req *protocol.Hoo
 // WithResolveModel registers the model-policy callback.
 func (o *Options) WithResolveModel(f func(ctx context.Context, req *protocol.GetModelPolicyRequest) (ModelPolicyResult, error)) *Options {
 	o.ResolveModel = f
+	return o
+}
+
+// WithMcpMessageHandler registers the in-process SDK MCP server proxy.
+func (o *Options) WithMcpMessageHandler(f func(ctx context.Context, serverName string, message json.RawMessage) (json.RawMessage, error)) *Options {
+	o.McpMessageHandler = f
+	return o
+}
+
+// WithSdkMcpServers declares in-process MCP server names served by this host.
+func (o *Options) WithSdkMcpServers(names ...string) *Options {
+	o.SdkMcpServers = append(o.SdkMcpServers, names...)
+	return o
+}
+
+// WithEnableFileCheckpointing turns on workspace snapshots (required for
+// file rewind).
+func (o *Options) WithEnableFileCheckpointing(b bool) *Options {
+	o.EnableFileCheckpointing = &b
+	return o
+}
+
+// WithResume resumes a persisted session by id.
+func (o *Options) WithResume(id string) *Options { o.Resume = id; return o }
+
+// WithContinue continues the most recent session.
+func (o *Options) WithContinue(b bool) *Options { o.Continue = b; return o }
+
+// WithForkSession forks the resumed session into a new id.
+func (o *Options) WithForkSession(b bool) *Options { o.ForkSession = b; return o }
+
+// WithPersistSession controls session persistence (explicit false disables).
+func (o *Options) WithPersistSession(b bool) *Options { o.PersistSession = &b; return o }
+
+// WithHooks registers host hook callbacks fired by the CLI.
+func (o *Options) WithHooks(h map[protocol.HookEvent][]protocol.HookSpec) *Options {
+	o.Hooks = h
+	return o
+}
+
+// WithAdditionalDirectories grants the agent extra working directories.
+func (o *Options) WithAdditionalDirectories(dirs ...string) *Options {
+	o.AdditionalDirectories = append(o.AdditionalDirectories, dirs...)
 	return o
 }

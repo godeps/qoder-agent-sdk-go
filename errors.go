@@ -11,6 +11,10 @@ var (
 	ErrCLINotFound       = errors.New("qoder: qoderclicn executable not found")
 	ErrInitializeTimeout = errors.New("qoder: qoderclicn initialization timed out")
 	ErrSessionClosed     = errors.New("qoder: session closed")
+	// ErrSessionNotEstablished is returned by control operations (e.g.
+	// SetModel, Interrupt) that the CLI only accepts once system/init has
+	// arrived — in practice after the first user turn has been processed.
+	ErrSessionNotEstablished = errors.New("qoder: session not established yet (send a turn first)")
 )
 
 // ProtocolVersionMismatchError is returned when the CLI announces a wire

@@ -132,10 +132,122 @@ Build with `qodersdk.NewOptions()` and the `With*` chain, or populate the struct
 | `WithSessionID` | `SessionID` | Resume/continue a session. |
 | `WithCanUseTool` | callback | Tool-permission callback (CLI `can_use_tool` → `protocol.PermissionResult`). |
 | `WithHookCallback` | callback | Hook execution callback (`protocol.HookJSONOutput`). |
+| `WithHooks` | `Hooks` | Register hook matchers per event; callback ids (`hook_N`) are auto-assigned. |
 | `WithResolveModel` | callback | Model-policy callback (BYOK, `ModelPolicyResult`). |
+| `WithMcpMessageHandler` | callback | In-process SDK MCP server proxy (JSON-RPC frames). |
+| `WithSdkMcpServers` | `SdkMcpServers` | Declare in-process MCP server names. |
+| `WithEnableFileCheckpointing` | — | Enable workspace snapshots (required for file rewind). |
+| `WithResume` / `WithContinue` / `WithForkSession` / `WithPersistSession` | — | Session lifecycle. |
 | — | `OnAuthExpired` | Fires (at most once) when auth expires. |
 
-Other fields: `Hooks`, `Agents`, `Skills`, `Plugins`, `Continue`, `Resume`, `ForkSession`, `PersistSession`, `AdditionalDirectories`, `SettingSources`, `Settings`, `ExtraArgs`, `CloseGraceMs`, `InitializeTimeoutMs`.
+Other fields: `Agents`, `Skills`, `Plugins`, `AdditionalDirectories`, `SettingSources`, `Settings`, `ExtraArgs`, `CloseGraceMs`, `InitializeTimeoutMs`.
+
+## Multi-turn sessions & control methods
+
+`Session` keeps one CLI process alive across turns (context persists
+in-process; no `--resume` needed):
+
+```go
+sess, _ := qodersdk.NewSession(ctx, opts)
+defer sess.Close()
+
+sess.Send("remember the number 91")
+res1, _, _ := sess.ReceiveResponse(60 * time.Second)
+
+sess.Send("what number did I say?")
+res2, _, _ := sess.ReceiveResponse(60 * time.Second) // "91"
+```
+
+Mid-session control (all verified against the real CLI):
+
+```go
+sess.SetModel("performance")                       // applies from next call
+sess.SetPermissionMode(protocol.PermissionAcceptEdits)
+sess.Interrupt()                                   // abort current turn
+cu, _ := sess.GetContextUsage()                    // /context-style usage
+ui, _ := sess.GetUsageInfo()                       // account quota + session credits
+ms, _ := sess.McpStatus()                          // MCP server states
+sess.RewindFiles(msgID, true)                      // dry-run file rollback
+sess.Rewind(msgID, protocol.RewindScopeBoth, false) // files + conversation
+```
+
+> Control methods that mutate the session (`SetModel`, `Interrupt`) require an
+> established session — call them after the first `Send`. The SDK guards this
+> with `ErrSessionNotEstablished`.
+
+## Hooks
+
+```go
+opts := qodersdk.NewOptions().
+    WithHooks(map[protocol.HookEvent][]protocol.HookSpec{
+        protocol.HookPreToolUse: {{Matcher: "Bash"}},
+    }).
+    WithHookCallback(func(ctx context.Context, req *protocol.HookCallbackRequest) (protocol.HookJSONOutput, error) {
+        if strings.Contains(string(req.Input.ToolInput), "rm -rf") {
+            cont := false
+            return protocol.HookJSONOutput{Continue: &cont, Decision: "block", Reason: "destructive"}, nil
+        }
+        return protocol.HookJSONOutput{}, nil // proceed
+    })
+```
+
+Callback ids (`hook_N`) are generated deterministically at initialize, so
+registration needs no manual ids. A PreToolUse block requires
+`Continue: false` (verified against qodercli 1.1.49).
+
+## In-process SDK MCP servers
+
+Serve tools in-process — the CLI proxies JSON-RPC frames through the
+`mcp_message` control channel (declared via `--mcp-config` +
+`--allowed-mcp-server-names`, wired automatically):
+
+```go
+opts := qodersdk.NewOptions().
+    WithSdkMcpServers("my-tools").
+    WithMcpServers(map[string]protocol.McpServerConfig{
+        "my-tools": protocol.NewMcpSdkConfig("my-tools"),
+    }).
+    WithMcpMessageHandler(func(ctx context.Context, server string, msg json.RawMessage) (json.RawMessage, error) {
+        // answer initialize / tools/list / tools/call JSON-RPC frames
+        return handleJSONRPC(msg), nil
+    })
+```
+
+## BYOK (Bring Your Own Key)
+
+Manage third-party model credentials through a live session:
+
+```go
+cat, _ := sess.GetByokConfig()          // server-side provider catalog
+ok, _ := sess.ValidateByokModel("openai", "gpt-x", "sk-...", "", "")
+ref, _ := sess.CreateByokModelConfig(qodersdk.ByokModelConfigInput{...})
+cfgs, _ := sess.ListByokConfigs()
+sess.UpdateByokModelConfig(qodersdk.UpdateByokModelConfigInput{Key: ref.Key, ...})
+res, _ := sess.CheckByokModelConfig(qodersdk.ByokModelConfigInput{...})
+sess.DeleteByokConfigByKey(ref.Key)
+// custom OpenAI-compatible / Alibaba providers:
+sess.CreateByokCustomProvider(qodersdk.CustomByokProviderConfigInput{...})
+```
+
+Per-call BYOK credentials can also flow through `WithResolveModel`
+(`ModelPolicyResult.CustomModel`).
+
+## Plugin management
+
+Session-less wrappers over `qodercli plugins <subcommand> --json` (a plugin
+bundles skills, agents, MCP servers, commands, and hooks):
+
+```go
+plugins, _ := qodersdk.ListPlugins(ctx, &qodersdk.PluginOptions{})
+res, _ := qodersdk.InstallPlugin(ctx, "my-plugin@marketplace", &qodersdk.PluginOptions{Scope: qodersdk.PluginScopeUser})
+qodersdk.EnablePlugin(ctx, res.PluginID, nil)
+qodersdk.DisablePlugin(ctx, res.PluginID, nil)
+qodersdk.UninstallPlugin(ctx, res.PluginID, &qodersdk.PluginOptions{KeepData: true})
+report, _ := qodersdk.ValidatePlugin(ctx, "./my-plugin", nil) // static; executes nothing
+// live-session reload:
+sess.ReloadPlugins()
+sess.ReloadSkills()
+```
 
 ## Wire protocol
 
@@ -151,8 +263,8 @@ Decode any line with `protocol.ParseMessage(line)`, then type-switch.
 
 | Package | Contents |
 |---|---|
-| `qodersdk` (root) | `Query`, `Options`, `ModelPolicyResult`, errors. |
-| `protocol` | Wire types: `Message`/`ParseMessage`, `AssistantMessage`, `ResultMessage`, `SystemMessage`, `ControlRequest`/`Response`, `InitializeRequest`, `McpServerConfig`, `PermissionMode`, `HookEvent`, `AgentDefinition`, `WireProtocolVersion`. |
+| `qodersdk` (root) | `Query`, `ListModels`, `Session` (multi-turn + control), BYOK methods, plugin management, `Options`, `ModelPolicyResult`, errors. |
+| `protocol` | Wire types: `Message`/`ParseMessage`, `AssistantMessage`, `ResultMessage`, `SystemMessage`, `ControlRequest`/`Response`, `InitializeRequest`/`InitializeResponse`, control response payloads (`InterruptResponse`, `GetContextUsageResponse`, `GetUsageInfoResponse`, `RewindResult`, BYOK types…), `McpServerConfig`, `PermissionMode`, `HookEvent`, `AgentDefinition`, `WireProtocolVersion`. |
 | `auth` | `AuthOptions`, `Brand`, `AccessToken*`/`QodercliAuth`/`ServiceAccount*`/`JobToken`, `WritePayloadFile`. |
 | `transport` | `ProcessTransport` (spawn + JSONL I/O + graceful shutdown). |
 | `runtime` | `ResolvePath(brand, override)`, `BinaryNames(brand)`. |
@@ -175,14 +287,26 @@ In-process MCP (CLI→SDK `mcp_message` control) is brokered through callbacks.
 
 ## Testing
 
-- `internal/fakecli`: a scripted fake `qoderclicn` used by the SDK's integration tests (handshake → initialize → assistant → result → control round-trips).
-- Unit tests cover protocol decoding, transport argv/env, auth payload, and brand env resolution.
-- Real end-to-end: the SDK is verified against real `qodercli 1.1.49` via `qodercliAuth` (local login).
+- `internal/fakecli`: a scripted fake `qoderclicn` used by the SDK's unit tests (handshake → initialize → multi-turn assistant/result → control round-trips, incl. blocking `can_use_tool` / `hook_callback` and typed responses for set_model/interrupt/context_usage/byok/rewind/reload).
+- Unit tests cover protocol decoding, transport argv/env, auth payload, brand env resolution, Session multi-turn + all control methods, BYOK CRUD, hooks wiring, and MCP handler plumbing.
+- Real end-to-end suite (gated on `QODER_SDK_E2E=1`), verified against `qodercli 1.1.49` with `QodercliAuth()`:
+
+| E2E test | Verifies |
+|---|---|
+| `TestE2E_QueryOnce` | one-shot query round-trip |
+| `TestE2E_Session_MultiTurn` | in-process context retention across turns |
+| `TestE2E_GetContextUsage_And_UsageInfo` | context window + account usage |
+| `TestE2E_SetModel` | mid-session model switch takes effect |
+| `TestE2E_Interrupt` | turn abort mid-generation |
+| `TestE2E_Hooks_Block` | PreToolUse hook blocks the tool (canary file NOT created) |
+| `TestE2E_CanUseTool_Deny` | permission prompt routed to the SDK callback |
+| `TestE2E_SdkMCP` | in-process MCP tool called via `mcp_message` |
+| `TestE2E_PluginManagement` | `plugins list` + static `plugins validate` |
 
 ```bash
 go test ./...
-# Real CLI (set QODERCLI_PATH or have qoderclicn/qodercli in PATH):
-QODERCLI_PATH=/path/to/qodercli go test ./...
+# Real CLI suite:
+QODER_SDK_E2E=1 go test -run TestE2E -v
 ```
 
 ## License

@@ -134,10 +134,113 @@ func main() {
 | `WithSessionID` | `SessionID` | 恢复/继续会话。 |
 | `WithCanUseTool` | 回调 | 工具权限回调(CLI `can_use_tool` → `protocol.PermissionResult`)。 |
 | `WithHookCallback` | 回调 | Hook 执行回调(`protocol.HookJSONOutput`)。 |
+| `WithHooks` | `Hooks` | 按事件注册 hook matcher;回调 id(`hook_N`)自动分配。 |
 | `WithResolveModel` | 回调 | 模型策略回调(BYOK,`ModelPolicyResult`)。 |
+| `WithMcpMessageHandler` | 回调 | 进程内 SDK MCP 服务器代理(JSON-RPC 帧)。 |
+| `WithSdkMcpServers` | `SdkMcpServers` | 声明进程内 MCP 服务器名。 |
+| `WithEnableFileCheckpointing` | — | 启用工作区快照(文件回退 rewind 必需)。 |
+| `WithResume` / `WithContinue` / `WithForkSession` / `WithPersistSession` | — | 会话生命周期。 |
 | — | `OnAuthExpired` | 认证过期时触发(每会话最多一次)。 |
 
-其他字段:`Hooks`、`Agents`、`Skills`、`Plugins`、`Continue`、`Resume`、`ForkSession`、`PersistSession`、`AdditionalDirectories`、`SettingSources`、`Settings`、`ExtraArgs`、`CloseGraceMs`、`InitializeTimeoutMs`。
+其他字段:`Agents`、`Skills`、`Plugins`、`AdditionalDirectories`、`SettingSources`、`Settings`、`ExtraArgs`、`CloseGraceMs`、`InitializeTimeoutMs`。
+
+## 多轮会话与控制方法
+
+`Session` 让一个 CLI 进程跨轮存活(上下文在进程内保持,无需 `--resume`):
+
+```go
+sess, _ := qodersdk.NewSession(ctx, opts)
+defer sess.Close()
+
+sess.Send("记住数字 91")
+res1, _, _ := sess.ReceiveResponse(60 * time.Second)
+
+sess.Send("我让你记的数字是几?")
+res2, _, _ := sess.ReceiveResponse(60 * time.Second) // "91"
+```
+
+会话中控制(均经真实 CLI 验证):
+
+```go
+sess.SetModel("performance")                        // 下一次调用生效
+sess.SetPermissionMode(protocol.PermissionAcceptEdits)
+sess.Interrupt()                                    // 中止当前轮
+cu, _ := sess.GetContextUsage()                     // /context 风格用量
+ui, _ := sess.GetUsageInfo()                        // 账户配额 + 会话积分
+ms, _ := sess.McpStatus()                           // MCP 服务器状态
+sess.RewindFiles(msgID, true)                       // 文件回退 dry-run
+sess.Rewind(msgID, protocol.RewindScopeBoth, false) // 文件 + 对话
+```
+
+> 会话变更类控制(`SetModel`、`Interrupt`)要求会话已建立——首轮 `Send` 之后调用;之前调用返回 `ErrSessionNotEstablished`。
+
+## Hooks
+
+```go
+opts := qodersdk.NewOptions().
+    WithHooks(map[protocol.HookEvent][]protocol.HookSpec{
+        protocol.HookPreToolUse: {{Matcher: "Bash"}},
+    }).
+    WithHookCallback(func(ctx context.Context, req *protocol.HookCallbackRequest) (protocol.HookJSONOutput, error) {
+        if strings.Contains(string(req.Input.ToolInput), "rm -rf") {
+            cont := false
+            return protocol.HookJSONOutput{Continue: &cont, Decision: "block", Reason: "危险命令"}, nil
+        }
+        return protocol.HookJSONOutput{}, nil // 放行
+    })
+```
+
+回调 id(`hook_N`)在 initialize 时确定性生成,注册无需手工指定 id。PreToolUse 拦截需要 `Continue: false`(qodercli 1.1.49 实测)。
+
+## 进程内 SDK MCP 服务器
+
+工具在本进程内服务——CLI 通过 `mcp_message` 控制通道代理 JSON-RPC 帧(`--mcp-config` + `--allowed-mcp-server-names` 自动接线):
+
+```go
+opts := qodersdk.NewOptions().
+    WithSdkMcpServers("my-tools").
+    WithMcpServers(map[string]protocol.McpServerConfig{
+        "my-tools": protocol.NewMcpSdkConfig("my-tools"),
+    }).
+    WithMcpMessageHandler(func(ctx context.Context, server string, msg json.RawMessage) (json.RawMessage, error) {
+        // 应答 initialize / tools/list / tools/call JSON-RPC 帧
+        return handleJSONRPC(msg), nil
+    })
+```
+
+## BYOK(自带密钥)
+
+通过活动会话管理第三方模型凭据:
+
+```go
+cat, _ := sess.GetByokConfig()          // 服务端 provider 目录
+ok, _ := sess.ValidateByokModel("openai", "gpt-x", "sk-...", "", "")
+ref, _ := sess.CreateByokModelConfig(qodersdk.ByokModelConfigInput{...})
+cfgs, _ := sess.ListByokConfigs()
+sess.UpdateByokModelConfig(qodersdk.UpdateByokModelConfigInput{Key: ref.Key, ...})
+res, _ := sess.CheckByokModelConfig(qodersdk.ByokModelConfigInput{...})
+sess.DeleteByokConfigByKey(ref.Key)
+// 自定义 OpenAI 兼容 / Alibaba provider:
+sess.CreateByokCustomProvider(qodersdk.CustomByokProviderConfigInput{...})
+```
+
+单次调用的 BYOK 凭据也可通过 `WithResolveModel`(`ModelPolicyResult.CustomModel`)注入。
+
+## Plugin 管理
+
+`qodercli plugins <子命令> --json` 的无会话封装(一个 plugin 可捆绑 skills、agents、MCP servers、commands、hooks):
+
+```go
+plugins, _ := qodersdk.ListPlugins(ctx, &qodersdk.PluginOptions{})
+res, _ := qodersdk.InstallPlugin(ctx, "my-plugin@marketplace", &qodersdk.PluginOptions{Scope: qodersdk.PluginScopeUser})
+qodersdk.EnablePlugin(ctx, res.PluginID, nil)
+qodersdk.DisablePlugin(ctx, res.PluginID, nil)
+qodersdk.UninstallPlugin(ctx, res.PluginID, &qodersdk.PluginOptions{KeepData: true})
+report, _ := qodersdk.ValidatePlugin(ctx, "./my-plugin", nil) // 静态校验,不执行任何代码
+// 活动会话内热重载:
+sess.ReloadPlugins()
+sess.ReloadSkills()
+```
 
 ## 线协议(Wire protocol)
 
@@ -153,8 +256,8 @@ func main() {
 
 | 包 | 内容 |
 |---|---|
-| `qodersdk`(根) | `Query`、`Options`、`ModelPolicyResult`、错误类型。 |
-| `protocol` | 线协议类型:`Message`/`ParseMessage`、`AssistantMessage`、`ResultMessage`、`SystemMessage`、`ControlRequest`/`Response`、`InitializeRequest`、`McpServerConfig`、`PermissionMode`、`HookEvent`、`AgentDefinition`、`WireProtocolVersion`。 |
+| `qodersdk`(根) | `Query`、`ListModels`、`Session`(多轮 + 控制)、BYOK 方法、Plugin 管理、`Options`、`ModelPolicyResult`、错误类型。 |
+| `protocol` | 线协议类型:`Message`/`ParseMessage`、`AssistantMessage`、`ResultMessage`、`SystemMessage`、`ControlRequest`/`Response`、`InitializeRequest`、控制响应载荷(`InterruptResponse`、`GetContextUsageResponse`、`GetUsageInfoResponse`、`RewindResult`、BYOK 类型…)、`McpServerConfig`、`PermissionMode`、`HookEvent`、`AgentDefinition`、`WireProtocolVersion`。 |
 | `auth` | `AuthOptions`、`Brand`、`AccessToken*`/`QodercliAuth`/`ServiceAccount*`/`JobToken`、`WritePayloadFile`。 |
 | `transport` | `ProcessTransport`(spawn + JSONL I/O + 优雅关闭)。 |
 | `runtime` | `ResolvePath(brand, override)`、`BinaryNames(brand)`。 |
@@ -177,14 +280,27 @@ opts.WithMcpServers(map[string]protocol.McpServerConfig{
 
 ## 测试
 
-- `internal/fakecli`:一个脚本化的 fake `qoderclicn`,用于 SDK 集成测试(握手 → initialize → assistant → result → 控制请求往返)。
-- 单元测试覆盖协议解码、transport argv/env、auth payload、brand 环境变量解析。
-- 真实端到端:SDK 已用真实 `qodercli 1.1.49` 通过 `qodercliAuth`(本地登录态)验证。
+- `internal/fakecli`:脚本化的假 `qoderclicn`,用于 SDK 单元测试(握手 → initialize → 多轮 assistant/result → 控制往返,含阻塞式 `can_use_tool`/`hook_callback` 与 set_model/interrupt/context_usage/byok/rewind/reload 的类型化响应)。
+- 单元测试覆盖:协议解码、transport argv/env、auth payload、brand env 解析、Session 多轮 + 全部控制方法、BYOK CRUD、hooks 接线、MCP handler 管线。
+- 真实 CLI E2E 套件(`QODER_SDK_E2E=1` 门控),针对 `qodercli 1.1.49` + `QodercliAuth()` 全部验证通过:
+
+| E2E 测试 | 验证内容 |
+|---|---|
+| `TestListModels_RealQodercli` | 模型目录(12 个模型) |
+| `TestE2E_QueryOnce` | 单发查询往返 |
+| `TestE2E_Session_MultiTurn` | 跨轮上下文保持("记住91"→"91") |
+| `TestE2E_GetContextUsage_And_UsageInfo` | 上下文窗口 + 账户用量 |
+| `TestE2E_SetModel` | 会话中模型切换实际生效 |
+| `TestE2E_Interrupt` | 生成中途打断 |
+| `TestE2E_Hooks_Block` | PreToolUse hook 拦截工具(canary 文件未创建) |
+| `TestE2E_CanUseTool_Deny` | 权限提示路由到 SDK 回调并遵守拒绝 |
+| `TestE2E_SdkMCP` | 进程内 MCP 工具经 `mcp_message` 被真实调用 |
+| `TestE2E_PluginManagement` | `plugins list` + 静态 `plugins validate` 报告解析 |
 
 ```bash
 go test ./...
-# 真实 CLI(设置 QODERCLI_PATH 或在 PATH 中有 qoderclicn/qodercli):
-QODERCLI_PATH=/path/to/qodercli go test ./...
+# 真实 CLI 套件:
+QODER_SDK_E2E=1 go test -run TestE2E -v
 ```
 
 ## 许可证
